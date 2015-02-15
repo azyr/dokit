@@ -5,13 +5,10 @@ import json
 import re
 import logging
 import digitalocean
-import azlib as az
-import numpy as np
+from .dokit import *
+from datetime import datetime
 from ruamel import yaml
 from time import sleep
-
-# TODO: ask for ipengine and ipcontroller executables and put the standard
-#       checks in own function so that they can be shared with init
 
 ######## CONSTANTS #########################################
 HEADER = "docluster -- IPython cluster tools for Digital Ocean infrastructure"
@@ -67,19 +64,11 @@ default_region: null
 logging_level: INFO
 
 logging_format: "%(asctime)s [%(levelname)s] %(message)s"
-
-# Digital Ocean token with read/write access
-digitalocean_token: null
 """
-class EXIT_CODE:
-    OK = 0
-    INVALID_ARGUMENTS = 1
-    RUNTIME_ERROR = 2
-
 ######### GLOBAL VARIABLES #######################
 
 # holder for global variables
-g = az.Bunch()
+g = Bunch()
 
 ######### EXCEPTIONS ##################
 
@@ -92,100 +81,7 @@ class ClusterDoesntExistException(Exception):
 class EngineFileNotFoundException(Exception):
     pass
 
-class RemoteException(Exception):
-    pass
-
-class ShellException(Exception):
-    pass
-
-######### FORMATTERS ##################
-
-def image_to_str(x):
-    s = "{}, id: {}, min_disk_size: {}GB".format(x.name, x.id, x.min_disk_size)
-    return s
-
-def instance_to_str(x):
-    s = "id: {}, {} VCPUs, {}GB RAM, {} $/h, {:.1f} VCPUs/1$/h"\
-        .format(x.slug, x.vcpus, x.memory / 1024, x.price_hourly, x.vcpus / x.price_hourly)
-    return s
-
-def sshkey_to_str(x):
-    s = "{} (id: {})".format(x.name, x.id)
-    return s
-
-def region_to_str(x):
-    s = "{} ({})".format(x.name, x.slug)
-    return s
-
-########## USER INPUT ####################
-
-def choose_from_list(items, title=None, formatter=None, idcol=None):
-    if title:
-        print(title)
-    if not formatter:
-        def default_formatter(item):
-            return str(item)
-        formatter = default_formatter
-    if idcol:
-        ids = [x.__dict__[idcol] for x in items]
-    else:
-        ids = [str(i+1) for i in range(len(items))]
-    while True:
-        for i in range(len(items)):
-            item = items[i]
-            print("{}: {}".format(ids[i], formatter(item)))
-        selection = input("> ")
-        try:
-            idx = ids.index(selection)
-        except ValueError:
-            print("Invalid selection")
-            continue
-        return items[idx]
-
-def ask_yes_no(question, show_yn=False):
-    q = question + " "
-    if show_yn:
-        q += "(y/n) "
-    while True:
-        answer = input(q).lower()
-        if answer in ['y', 'yes']:
-            return True
-        if answer in ['n', 'no']:
-            return False
-
-def ask_integer(question, limits=None):
-    q = question + " "
-    if limits:
-        assert len(limits) == 2
-        q += "[{}-{}] ".format(limits[0], limits[1])
-    while True:
-        answer = input(q)
-        try:
-            answer = int(answer)
-        except ValueError:
-            print("Invalid selection")
-            continue
-        if limits[0] <= answer <= limits[1]:
-            return answer
-        print("Invalid selection")
-
-def ask_file(question, suggestion=None, include_syspath=False):
-    while True:
-        q = question + " "
-        if suggestion:
-            q += "[{}] ".format(suggestion)
-        answer = input(q)
-        if not answer:
-            answer = suggestion
-            suggestion = None
-        if os.path.isfile(answer):
-            return answer
-        if include_syspath:
-            if run_shell_process('which {}'.format(answer)).stdout.readlines():
-                return answer
-        print("File not found")
-
-##########################################
+#########################################
 
 def check_for_general_settings():
     general_settings_dir = os.path.join(g.docluster_dir, "general")
@@ -196,6 +92,14 @@ def check_for_general_settings():
         with open(general_settings_file, 'w') as f:
             f.write(DEFAULT_GENERAL_SETTINGS)
     settings = yaml.load(open(general_settings_file), yaml.RoundTripLoader)
+    return settings
+
+def check_for_dokit_settings():
+    dokit_settings_file = os.path.join(g.dokit_dir, "settings.yaml")
+    if not os.path.isfile(dokit_settings_file):
+        with open(dokit_settings_file, 'w') as f:
+            f.write(DEFAULT_DOKIT_SETTINGS)
+    settings = yaml.load(open(dokit_settings_file), yaml.RoundTripLoader)
     return settings
 
 def get_valid_regions(print_info=True):
@@ -229,11 +133,6 @@ def get_private_sshkey():
     keyfile = ask_file("Path to private part of they sshkey: ") 
     g.settings['private_sshkey'] = keyfile
     save_general_settings()
-
-def setting_is_valid(settings, key):
-    if key in settings and settings[key]:
-        return True
-    return False
 
 def check_for_image():
     print("Retrieving list of images...")
@@ -279,6 +178,10 @@ def save_general_settings():
     general_settings_file = os.path.join(general_settings_dir, "settings.yaml")
     yaml.dump(g.settings, stream=open(general_settings_file, 'w'), Dumper=yaml.RoundTripDumper)
 
+def save_dokit_settings():
+    settings_file = os.path.join(g.dokit_dir, "settings.yaml")
+    yaml.dump(g.dokit_settings, stream=open(settings_file, 'w'), Dumper=yaml.RoundTripDumper)
+
 def ask_for_token():
     token = input("Digital Ocean token: ")
     print(token)
@@ -290,8 +193,8 @@ def ask_for_token():
         print("Token has to be 64 bytes long")
         ask_for_token()
         return
-    g.settings['digitalocean_token'] = token
-    save_general_settings()
+    g.dokit_settings['digitalocean_token'] = token
+    save_dokit_settings()
 
 def get_region(regions, instance):
     if not regions:
@@ -394,7 +297,7 @@ def create_cluster(name, stg):
             d.region = stg['region']
             d.size = instance
             d.image = image
-            d.token = g.settings['digitalocean_token']
+            d.token = g.dokit_settings['digitalocean_token']
             d.ssh_keys = [g.settings['public_sshkey']]
             d.private_networking = True
             d.create()
@@ -442,18 +345,6 @@ def setup_cluster(name):
     stg['nodes'] = [[num_nodes, nodespec]]
     yaml.dump(stg, open(cluster_settings_file, 'w'))
     print("Cluster settings saved")
-
-def run_shell_process(command, print_output=False):
-    p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    if print_output:
-        while True:
-            out = p.stdout.read(1).decode()
-            if out == '' and p.poll() != None:
-                break
-            if out != '':
-                sys.stdout.write(out)
-                sys.stdout.flush()
-    return p
 
 def initialize_ipcontroller(stg):
     executable = stg['ipcontroller_executable']
@@ -619,6 +510,7 @@ def start_new_cluster(name, ignore_running=False):
         sure = ask_yes_no("Are you sure you want to start this cluster?")
         if not sure:
             return
+    start_time = datetime.utcnow()
     try:
         create_cluster(name, cluster_settings)
     except ClusterAlreadyRunningException as ex:
@@ -633,12 +525,14 @@ def start_new_cluster(name, ignore_running=False):
     send_keys_and_config_to_nodes(name, cluster_settings['ipcontroller_engine_file'])
     configure_nodes(cluster_settings)
     print("Cluster succesfully started")
+    print("Time elapsed: {}".format(datetime.utcnow() - start_time))
 
 def destroy_cluster(name, purge=False):
     if not setting_is_valid(g.settings, 'no_confirmations'):
         sure = ask_yes_no("Are you sure you want to destroy '{}'?".format(name))
         if not sure:
             return
+    start_time = datetime.utcnow()
     print("Destroying cluster '{}'".format(name))
     if purge:
         cluster_settings_file = os.path.join(g.docluster_dir, name + ".yaml")
@@ -669,6 +563,7 @@ def destroy_cluster(name, purge=False):
             break
         sleep(10)
     print("Cluster '{}' succesfully destroyed".format(name))
+    print("Time elapsed: {}".format(datetime.utcnow() - start_time))
 
 def setup_logging():
     logfile = os.path.join(g.docluster_dir, "docluster.log")
@@ -702,14 +597,16 @@ if __name__ == "__main__":
         sys.exit(EXIT_CODE.OK)
 
     homedir = os.path.expanduser('~')
-    g.docluster_dir = os.path.join(homedir, ".docluster")
+    g.dokit_dir = os.path.join(homedir, ".dokit")
+    g.docluster_dir = os.path.join(g.dokit_dir, "docluster")
     g.settings = check_for_general_settings()
+    g.dokit_settings = check_for_dokit_settings()
     setup_logging()
 
-    if 'digitalocean_token' not in g.settings or not g.settings['digitalocean_token']:
+    if not setting_is_valid(g.dokit_settings, 'digitalocean_token'):
         ask_for_token()
     
-    g.do = digitalocean.Manager(token=g.settings['digitalocean_token'])
+    g.do = digitalocean.Manager(token=g.dokit_settings['digitalocean_token'])
     g.sizes = g.do.get_all_sizes()
 
     action = args[0]
