@@ -64,6 +64,8 @@ default_region: null
 logging_level: INFO
 
 logging_format: "%(asctime)s [%(levelname)s] %(message)s"
+
+logging_dateformat: "%Y%m%d %H:%M:%S"
 """
 ######### GLOBAL VARIABLES #######################
 
@@ -577,6 +579,8 @@ def setup_logging():
     if setting_is_valid(g.settings, 'logging_dateformat'):
         datefmt = g.settings['logging_dateformat']
     r = logging.root
+    r.handlers.clear()
+    r.filters.clear()
     r.level = logging.NOTSET
     formatter = logging.Formatter(fmt=fmt, datefmt=datefmt)
     handler = logging.FileHandler(filename=logfile)
